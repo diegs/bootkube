@@ -11,8 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/coreos/etcd/clientv3"
 	"github.com/kubernetes-incubator/bootkube/pkg/recovery"
+
+	"github.com/coreos/etcd/clientv3"
 	"github.com/spf13/cobra"
 )
 
@@ -43,7 +44,7 @@ func init() {
 	cmdRecover.Flags().StringVar(&recoverOpts.etcdCAPath, "etcd-ca-path", "", "Path to an existing PEM encoded CA that will be used for TLS-enabled communication between the apiserver and etcd. Must be used in conjunction with --etcd-certificate-path and --etcd-private-key-path, and must have etcd configured to use TLS with matching secrets.")
 	cmdRecover.Flags().StringVar(&recoverOpts.etcdCertificatePath, "etcd-certificate-path", "", "Path to an existing certificate that will be used for TLS-enabled communication between the apiserver and etcd. Must be used in conjunction with --etcd-ca-path and --etcd-private-key-path, and must have etcd configured to use TLS with matching secrets.")
 	cmdRecover.Flags().StringVar(&recoverOpts.etcdPrivateKeyPath, "etcd-private-key-path", "", "Path to an existing private key that will be used for TLS-enabled communication between the apiserver and etcd. Must be used in conjunction with --etcd-ca-path and --etcd-certificate-path, and must have etcd configured to use TLS with matching secrets.")
-	cmdRecover.Flags().StringVar(&recoverOpts.etcdServers, "etcd-servers", "", "List of etcd servers URLs including host:port, comma separated. Cannot be specified with --etcd-data-dir.")
+	cmdRecover.Flags().StringVar(&recoverOpts.etcdServers, "etcd-servers", "", "List of etcd servers URLs including host:port, comma separated.")
 	cmdRecover.Flags().StringVar(&recoverOpts.etcdPrefix, "etcd-prefix", "/registry", "Path prefix to Kubernetes cluster data in etcd.")
 	cmdRecover.Flags().StringVar(&recoverOpts.kubeConfigPath, "kubeconfig", "", "Path to kubeconfig for communicating with the cluster.")
 }
@@ -67,16 +68,16 @@ func runCmdRecover(cmd *cobra.Command, args []string) error {
 
 func validateRecoverOpts(cmd *cobra.Command, args []string) error {
 	if recoverOpts.assetDir == "" {
-		return errors.New("Missing required flag: --asset-dir")
+		return errors.New("missing required flag: --asset-dir")
 	}
 	if (recoverOpts.etcdCAPath != "" || recoverOpts.etcdCertificatePath != "" || recoverOpts.etcdPrivateKeyPath != "") && (recoverOpts.etcdCAPath == "" || recoverOpts.etcdCertificatePath == "" || recoverOpts.etcdPrivateKeyPath == "") {
-		return errors.New("You must specify either all or none of --etcd-ca-path, --etcd-certificate-path, and --etcd-private-key-path")
+		return errors.New("you must specify either all or none of --etcd-ca-path, --etcd-certificate-path, and --etcd-private-key-path")
 	}
 	if recoverOpts.etcdPrefix == "" {
-		return errors.New("Missing required flag: --etcd-prefix")
+		return errors.New("missing required flag: --etcd-prefix")
 	}
 	if recoverOpts.kubeConfigPath == "" {
-		return errors.New("Missing required flag: --kubeconfig")
+		return errors.New("missing required flag: --kubeconfig")
 	}
 	return nil
 }

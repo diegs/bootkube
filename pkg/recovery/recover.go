@@ -17,7 +17,6 @@ import (
 	"strings"
 
 	"github.com/ghodss/yaml"
-
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -33,18 +32,19 @@ const (
 	kubeletKubeConfigPath = "/etc/kubernetes/kubeconfig"
 )
 
+type stringSet map[string]bool
+
 var (
 	// bootstrapComponents contains the names of the components that we will extract to construct the
 	// temporary bootstrap control plane.
-	bootstrapComponents = map[string]bool{
+	bootstrapComponents = stringSet{
 		"kube-apiserver":          true,
 		"kube-controller-manager": true,
 		"kube-scheduler":          true,
-		"pod-checkpointer":        true,
 	}
 	// kubeConfigComponents contains the names of the bootstrap pods that need to add a --kubeconfig
 	// flag to run in non-self-hosted mode.
-	kubeConfigComponents = map[string]bool{
+	kubeConfigComponents = stringSet{
 		"kube-controller-manager": true,
 		"kube-scheduler":          true,
 	}
@@ -163,31 +163,73 @@ func (cp *controlPlane) renderSelfHosted() (asset.Assets, error) {
 // start` to re-bootstrap a control plane. These assets are derived from the self-hosted control
 // plane that was recovered by the backend, but modified for direct injection into a kubelet.
 func (cp *controlPlane) renderBootstrap(kubeConfigPath string) (asset.Assets, error) {
-	// Extract pod specs from daemonsets and deployments.
-	var pods []*v1.Pod
-	for _, ds := range cp.daemonSets.Items {
-		if componentName := ds.Labels["component"]; bootstrapComponents[componentName] {
-			pod := &v1.Pod{Spec: ds.Spec.Template.Spec}
-			if err := setBootstrapPodMetadata(pod, ds.ObjectMeta); err != nil {
-				return nil, err
-			}
-			pods = append(pods, pod)
-		}
+	pods, err := extractBootstrapPods(cp.daemonSets.Items, cp.deployments.Items)
+	if err != nil {
+		return nil, err
 	}
-	for _, ds := range cp.deployments.Items {
-		if componentName := ds.Labels["component"]; bootstrapComponents[componentName] {
-			pod := &v1.Pod{Spec: ds.Spec.Template.Spec}
-			if err := setBootstrapPodMetadata(pod, ds.ObjectMeta); err != nil {
-				return nil, err
-			}
-			pods = append(pods, pod)
-		}
+	requiredSecrets, err := fixUpBootstrapPods(pods)
+	if err != nil {
+		return nil, err
 	}
+	as, err := outputBootstrapPods(pods)
+	if err != nil {
+		return nil, err
+	}
+	secrets, err := outputBootstrapSecrets(cp.secrets.Items, requiredSecrets)
+	if err != nil {
+		return nil, err
+	}
+	as = append(as, secrets...)
+	return as, nil
+}
 
-	// Fix up the pods.
-	var as asset.Assets
-	requiredSecrets := make(map[string]bool)
-	for _, pod := range pods {
+// extractBootstrapPods extracts bootstrap pod specs from daemonsets and deployments.
+func extractBootstrapPods(daemonSets []v1beta1.DaemonSet, deployments []v1beta1.Deployment) ([]v1.Pod, error) {
+	var pods []v1.Pod
+	for _, ds := range daemonSets {
+		if componentName := ds.Labels["component"]; bootstrapComponents[componentName] {
+			pod := v1.Pod{Spec: ds.Spec.Template.Spec}
+			if err := setBootstrapPodMetadata(&pod, ds.ObjectMeta); err != nil {
+				return nil, err
+			}
+			pods = append(pods, pod)
+		}
+	}
+	for _, ds := range deployments {
+		if componentName := ds.Labels["component"]; bootstrapComponents[componentName] {
+			pod := v1.Pod{Spec: ds.Spec.Template.Spec}
+			if err := setBootstrapPodMetadata(&pod, ds.ObjectMeta); err != nil {
+				return nil, err
+			}
+			pods = append(pods, pod)
+		}
+	}
+	return pods, nil
+}
+
+// setBootstrapPodMetadata creates valid metadata for a bootstrap pod. Currently it sets the
+// TypeMeta and Name, Namespace, and Annotations on the ObjectMeta.
+func setBootstrapPodMetadata(pod *v1.Pod, parent metav1.ObjectMeta) error {
+	if err := setTypeMeta(pod); err != nil {
+		return err
+	}
+	pod.ObjectMeta = metav1.ObjectMeta{
+		Annotations: parent.Annotations,
+		Name:        "bootstrap-" + parent.Name,
+		Namespace:   parent.Namespace,
+	}
+	return nil
+}
+
+// fixUpBootstrapPods modifies extracted bootstrap pod specs to have correct metadata and
+// point to filesystem-mount-based secrets. It returns a set of secrets that must also be rendered
+// in order for the bootstrap pods to be functional.
+// TODO(diegs): also output the set of reqiured configMaps.
+func fixUpBootstrapPods(pods []v1.Pod) (stringSet, error) {
+	requiredSecrets := make(stringSet)
+	for i := range pods {
+		pod := &pods[i]
+
 		// Change secret volumes to point to file mounts.
 		for i := range pod.Spec.Volumes {
 			vol := &pod.Spec.Volumes[i]
@@ -200,7 +242,7 @@ func (cp *controlPlane) renderBootstrap(kubeConfigPath string) (asset.Assets, er
 		}
 
 		// Make sure the kubeconfig is in the commandline.
-		for i, _ := range pod.Spec.Containers {
+		for i := range pod.Spec.Containers {
 			cn := &pod.Spec.Containers[i]
 			// Assumes the bootkube naming convention is used. Could also just make sure the image uses hyperkube.
 			if kubeConfigComponents[cn.Name] {
@@ -219,16 +261,28 @@ func (cp *controlPlane) renderBootstrap(kubeConfigPath string) (asset.Assets, er
 			Name:         "kubeconfig",
 		})
 
-		// Output the pod definition.
-		a, err := serializeYAML(path.Join(asset.AssetPathBootstrapManifests, pod.Name+".yaml"), pod)
+	}
+	return requiredSecrets, nil
+}
+
+// outputBootstrapPods outputs the bootstrap pod definitions.
+func outputBootstrapPods(pods []v1.Pod) (asset.Assets, error) {
+	var as asset.Assets
+	for _, pod := range pods {
+		a, err := serializeObjToYAML(path.Join(asset.AssetPathBootstrapManifests, pod.Name+".yaml"), &pod)
 		if err != nil {
 			return nil, err
 		}
 		as = append(as, a)
 	}
+	return as, nil
+}
 
-	// Output all the required secrets.
-	for _, secret := range cp.secrets.Items {
+// outputBootstrapSecrets creates assets for all the secret names in the requiredSecrets set. It
+// returns an error if any secret cannot be found in the provided secrets list.
+func outputBootstrapSecrets(secrets []v1.Secret, requiredSecrets stringSet) (asset.Assets, error) {
+	var as asset.Assets
+	for _, secret := range secrets {
 		if requiredSecrets[secret.Name] {
 			for key, data := range secret.Data {
 				as = append(as, asset.Asset{
@@ -239,7 +293,6 @@ func (cp *controlPlane) renderBootstrap(kubeConfigPath string) (asset.Assets, er
 			delete(requiredSecrets, secret.Name)
 		}
 	}
-
 	if len(requiredSecrets) > 0 {
 		var missingSecrets []string
 		for secret := range requiredSecrets {
@@ -247,7 +300,6 @@ func (cp *controlPlane) renderBootstrap(kubeConfigPath string) (asset.Assets, er
 		}
 		return nil, fmt.Errorf("failed to extract some required bootstrap secrets: %v", missingSecrets)
 	}
-
 	return as, nil
 }
 
@@ -276,20 +328,6 @@ func setTypeMeta(obj runtime.Object) error {
 	return nil
 }
 
-// setBootstrapPodMetadata creates valid metadata for a bootstrap pod. Currently it sets the
-// TypeMeta and Name, Namespace, and Annotations on the ObjectMeta.
-func setBootstrapPodMetadata(pod *v1.Pod, parent metav1.ObjectMeta) error {
-	if err := setTypeMeta(pod); err != nil {
-		return err
-	}
-	pod.ObjectMeta = metav1.ObjectMeta{
-		Annotations: parent.Annotations,
-		Name:        "bootstrap-" + parent.Name,
-		Namespace:   parent.Namespace,
-	}
-	return nil
-}
-
 // serializeListObjToYAML takes a runtime.Object of type 'list', fixes up the metadata of each
 // element, and serializes them to YAML assets using the naming convention `name-kind.yaml`.
 func serializeListObjToYAML(outerObj runtime.Object) (asset.Assets, error) {
@@ -310,7 +348,7 @@ func serializeListObjToYAML(outerObj runtime.Object) (asset.Assets, error) {
 		if err != nil {
 			return nil, err
 		}
-		a, err := serializeYAML(path.Join(asset.AssetPathManifests, name+"-"+strings.ToLower(kind)+".yaml"), obj)
+		a, err := serializeObjToYAML(path.Join(asset.AssetPathManifests, name+"-"+strings.ToLower(kind)+".yaml"), obj)
 		if err != nil {
 			return nil, err
 		}
@@ -319,8 +357,8 @@ func serializeListObjToYAML(outerObj runtime.Object) (asset.Assets, error) {
 	return as, nil
 }
 
-// serializeYAML serializes a runtime.Object into a YAML asset.
-func serializeYAML(assetName string, obj runtime.Object) (asset.Asset, error) {
+// serializeObjToYAML serializes a runtime.Object into a YAML asset.
+func serializeObjToYAML(assetName string, obj runtime.Object) (asset.Asset, error) {
 	data, err := yaml.Marshal(obj)
 	if err != nil {
 		return asset.Asset{}, err

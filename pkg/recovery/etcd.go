@@ -7,27 +7,24 @@ import (
 	"context"
 	"fmt"
 	"path"
-	"reflect"
 	"strings"
 
 	"github.com/coreos/etcd/clientv3"
-
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/conversion"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/pkg/api"
 )
 
-// EtcdBackend is a backend that extracts a controlPlane from an etcd instance.
-type EtcdBackend struct {
+// etcdBackend is a backend that extracts a controlPlane from an etcd instance.
+type etcdBackend struct {
 	client     *clientv3.Client
 	decoder    runtime.Decoder
 	pathPrefix string
 }
 
-// NewEtcdBackend constructs a new EtcdBackend for the given client and pathPrefix.
+// NewEtcdBackend constructs a new etcdBackend for the given client and pathPrefix.
 func NewEtcdBackend(client *clientv3.Client, pathPrefix string) Backend {
-	return &EtcdBackend{
+	return &etcdBackend{
 		client:     client,
 		decoder:    api.Codecs.UniversalDecoder(),
 		pathPrefix: pathPrefix,
@@ -35,43 +32,43 @@ func NewEtcdBackend(client *clientv3.Client, pathPrefix string) Backend {
 }
 
 // read implements Backend.read().
-func (s *EtcdBackend) read(ctx context.Context) (*controlPlane, error) {
+func (s *etcdBackend) read(ctx context.Context) (*controlPlane, error) {
 	cp := &controlPlane{}
 	for _, r := range []struct {
-		etcdName string
-		yamlName string
-		obj      runtime.Object
+		etcdKeyName string
+		yamlName    string
+		obj         runtime.Object
 	}{{
-		etcdName: "configmaps",
-		yamlName: "config-map",
-		obj:      &cp.configMaps,
+		etcdKeyName: "configmaps",
+		yamlName:    "config-map",
+		obj:         &cp.configMaps,
 	}, {
-		etcdName: "daemonsets",
-		yamlName: "daemonset",
-		obj:      &cp.daemonSets,
+		etcdKeyName: "daemonsets",
+		yamlName:    "daemonset",
+		obj:         &cp.daemonSets,
 	}, {
-		etcdName: "deployments",
-		yamlName: "deployment",
-		obj:      &cp.deployments,
+		etcdKeyName: "deployments",
+		yamlName:    "deployment",
+		obj:         &cp.deployments,
 	}, {
-		etcdName: "poddisruptionbudgets",
-		yamlName: "pod-disruption-budget",
-		obj:      &cp.podDisruptionBudgets,
+		etcdKeyName: "poddisruptionbudgets",
+		yamlName:    "pod-disruption-budget",
+		obj:         &cp.podDisruptionBudgets,
 	}, {
-		etcdName: "secrets",
-		yamlName: "secret",
-		obj:      &cp.secrets,
+		etcdKeyName: "secrets",
+		yamlName:    "secret",
+		obj:         &cp.secrets,
 	}, {
-		etcdName: "services/specs",
-		yamlName: "service",
-		obj:      &cp.services,
+		etcdKeyName: "services/specs",
+		yamlName:    "service",
+		obj:         &cp.services,
 	}, {
-		etcdName: "serviceaccounts",
-		yamlName: "service-account",
-		obj:      &cp.serviceAccounts,
+		etcdKeyName: "serviceaccounts",
+		yamlName:    "service-account",
+		obj:         &cp.serviceAccounts,
 	},
 	} {
-		if err := s.list(ctx, r.etcdName, r.obj); err != nil {
+		if err := s.list(ctx, r.etcdKeyName, r.obj); err != nil {
 			return nil, err
 		}
 	}
@@ -79,7 +76,7 @@ func (s *EtcdBackend) read(ctx context.Context) (*controlPlane, error) {
 }
 
 // get fetches a single runtime.Object with key `key` from etcd.
-func (s *EtcdBackend) get(ctx context.Context, key string, out runtime.Object, ignoreNotFound bool) error {
+func (s *etcdBackend) get(ctx context.Context, key string, out runtime.Object, ignoreNotFound bool) error {
 	key = path.Join(s.pathPrefix, key, api.NamespaceSystem)
 	getResp, err := s.client.KV.Get(ctx, key)
 	if err != nil {
@@ -97,7 +94,7 @@ func (s *EtcdBackend) get(ctx context.Context, key string, out runtime.Object, i
 }
 
 // list fetches a list runtime.Object from etcd located at key prefix `key`.
-func (s *EtcdBackend) list(ctx context.Context, key string, listObj runtime.Object) error {
+func (s *etcdBackend) list(ctx context.Context, key string, listObj runtime.Object) error {
 	listPtr, err := meta.GetItemsPtr(listObj)
 	if err != nil {
 		return err
@@ -116,32 +113,4 @@ func (s *EtcdBackend) list(ctx context.Context, key string, listObj runtime.Obje
 		elems[i] = kv.Value
 	}
 	return decodeList(elems, listPtr, s.decoder)
-}
-
-// decode decodes value of bytes into object.
-func decode(decoder runtime.Decoder, value []byte, objPtr runtime.Object) error {
-	if _, err := conversion.EnforcePtr(objPtr); err != nil {
-		return fmt.Errorf("objPtr must be pointer, got: %T", objPtr)
-	}
-	_, _, err := decoder.Decode(value, nil, objPtr)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-// decodeList decodes a list of values into a list of objects.
-func decodeList(elems [][]byte, listPtr interface{}, decoder runtime.Decoder) error {
-	v, err := conversion.EnforcePtr(listPtr)
-	if err != nil || v.Kind() != reflect.Slice {
-		return fmt.Errorf("listPtr must be pointer to slice, got: %T", listPtr)
-	}
-	for _, elem := range elems {
-		obj, _, err := decoder.Decode(elem, nil, reflect.New(v.Type().Elem()).Interface().(runtime.Object))
-		if err != nil {
-			return err
-		}
-		v.Set(reflect.Append(v, reflect.ValueOf(obj).Elem()))
-	}
-	return nil
 }
